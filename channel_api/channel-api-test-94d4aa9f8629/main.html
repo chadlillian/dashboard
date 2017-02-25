@@ -1,0 +1,188 @@
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+        <title>Google App Engine - Channel API Test</title>
+        <script src="https://ajax.googleapis.com/ajax/libs/jquery/1.7.2/jquery.min.js"></script>
+        <script type="text/javascript" src="/_ah/channel/jsapi"></script>
+    </head>
+    <body>
+        <div id="loggingArea" style="overflow:auto; height:400px;">
+        </div>
+        <div id="results" style="height:200px;">
+            <div>
+                <button type="button" id="send_button">SEND</button>
+                <button type="button" id="send5_button">SEND 5</button>
+                <input type="text" id="message" value="echo!" style="width:300px;"/>
+            </div>
+            <div>
+                <div>
+                    Missing replies: <span id="missing_replies"></span>
+                </div>
+                <div>
+                    Average latency: <span id="average_latency"></span>
+                </div>
+                <div>
+                    Clients: [<span id="client_list"></span>]
+                </div>
+            </div>
+        </div>
+        <script>
+            /*global jQuery, goog*/
+            /*jslint browser: true, maxerr: 50, indent: 4*/
+            (function () {
+                "use strict";
+                jQuery(function () {
+                    var logging = function (msg) {
+                            var e = document.getElementById("loggingArea");
+                            e.innerHTML += '<br>' + msg;
+                            e.scrollTop = e.scrollHeight;    // auto scroll
+                        },
+                        connected = false,
+                        channel_id = '{{ channel_id }}',
+                        clientSequence = 0,
+                        clientSequences = [],
+                        updateMissingReplies = function () {
+                            var missingRepliesElement = document.getElementById("missing_replies"),
+                                i;
+                            missingRepliesElement.innerHTML = clientSequences.length.toString();
+                            for (i = 0; i < clientSequences.length; i += 1) {
+                                if (i === 0) {
+                                    missingRepliesElement.innerHTML += " [";
+                                }
+                                missingRepliesElement.innerHTML += clientSequences[i].toString();
+                                if (i === clientSequences.length - 1) {
+                                    missingRepliesElement.innerHTML += "]";
+                                } else {
+                                    missingRepliesElement.innerHTML += ", ";
+                                }
+                            }
+                        },
+                        latencies = [],
+                        updateAverageLatency = function (latency) {
+                            var element = document.getElementById("average_latency"),
+                                i,
+                                avgStart,
+                                runningAvg = 0,
+                                runningAvgLength = 0,
+                                numLatencies;
+                            latencies.push(latency);
+                            numLatencies = latencies.length;
+                            avgStart = Math.max(0, numLatencies - 5);
+                            runningAvgLength = numLatencies - avgStart;
+                            for (i = avgStart; i < numLatencies; i += 1) {
+                                runningAvg += latencies[i];
+                            }
+                            runningAvg /= runningAvgLength;
+                            element.innerHTML = runningAvg.toFixed(1) + 'ms';
+                        },
+                        sendMessage = function (msg) {
+                            var data;
+                            if (connected) {
+                                data = {
+                                    channel_id : channel_id,
+                                    clientSeq : clientSequence,
+                                    timestamp : Date.now(),
+                                    msg : msg
+                                };
+                                jQuery.post('/message', data);
+                                clientSequence += 1;
+                                logging("SEND [" + data.clientSeq.toString() + "]  \"" + data.msg + "\"");
+                                clientSequences.push(data.clientSeq);
+                                updateMissingReplies();
+                            }
+                        },
+                        handleEcho = function (msg) {
+                            var log_entry,
+                                time = Date.now(),
+                                total_latency,
+                                replyIndex;
+                            if (msg) {
+                                msg.server_time = parseInt(msg.server_time, 10);
+                                msg.timestamp = parseInt(msg.timestamp, 10);
+
+                                total_latency = time - msg.timestamp;
+
+                                log_entry = "RECV [" + msg.channel_id + " " + msg.clientSeq.toString() + "]" +
+                                            " (" + total_latency.toString() + "ms)" +
+                                            " \"" + msg.msg + "\"";
+                                logging(log_entry);
+
+                                if (msg.channel_id === channel_id) {
+                                    replyIndex = clientSequences.indexOf(msg.clientSeq);
+                                    if (replyIndex !== -1) {
+                                        clientSequences.splice(replyIndex, 1);
+                                    } else {
+                                        logging("DUPLICATE MESSAGE RECEIVED");
+                                    }
+                                    updateMissingReplies();
+                                    updateAverageLatency(total_latency);
+                                }
+                            }
+                        },
+                        handleClientList = function (msg) {
+                            var element = document.getElementById('client_list'),
+                                i,
+                                str = "";
+                            for (i = 0; i < msg.clients.length; i += 1) {
+                                if (i > 0) {
+                                    str += ", ";
+                                }
+                                str += msg.clients[i];
+                            }
+                            element.innerHTML = str;
+                            logging("RECV client_list [" + str + "]");
+                        },
+                        message_handlers = {
+                            'echo' : handleEcho,
+                            'client_list' : handleClientList
+                        },
+                        channel = new goog.appengine.Channel('{{ token }}');
+
+                    logging("Connecting to server...");
+                    channel.open({
+                        onopen : function () {
+                            connected = true;
+                            logging("===============================================");
+                            logging("Connected to [" + channel_id + "]");
+                        },
+                        onmessage : function (msg) {
+                            var data = jQuery.parseJSON(msg.data),
+                                handler;
+                            if (data !== undefined) {
+                                handler = message_handlers[data.type];
+                                if (handler !== undefined) {
+                                    handler(data);
+                                } else {
+                                    logging("unhandled message type: " + data.type);
+                                }
+                            } else {
+                                logging("ignoring malformed message: " + msg);
+                            }
+                        },
+                        onerror : function (err) {
+                            logging("error (" + err.code + ": " + err.description);
+                        },
+                        onclose : function () {
+                            connected = false;
+                            logging("Disconnected from [" + channel_id + "]");
+                            logging("===============================================");
+                        }
+                    });
+
+                    document.getElementById('send_button').onclick = function () {
+                        var msg = document.getElementById('message').value;
+                        sendMessage(msg);
+                    };
+                    document.getElementById('send5_button').onclick = function () {
+                        var msg = document.getElementById('message').value,
+                            i;
+                        for (i = 0; i < 5; i += 1) {
+                            sendMessage(msg);
+                        }
+                    };
+                });
+            }());
+        </script>
+    </body>
+</html>
+
